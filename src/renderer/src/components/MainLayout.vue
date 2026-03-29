@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, watch, onMounted } from 'vue'
 import type { FormInstance, FormRules } from 'element-plus'
+import { ElMessage } from 'element-plus'
 import { Coin, Monitor, CircleCheck, Setting, FolderOpened } from '@element-plus/icons-vue'
 import Terminal from './Terminal.vue'
 
@@ -25,7 +26,9 @@ const rules: FormRules = {
   path: [{ required: true, message: '请输入目录或文件路径', trigger: 'blur' }]
 }
 
-const selectedService = computed(() => services.value.find((s) => s.id === selectedId.value) ?? null)
+const selectedService = computed(
+  () => services.value.find((s) => s.id === selectedId.value) ?? null
+)
 
 function loadServices(): void {
   try {
@@ -34,7 +37,8 @@ function loadServices(): void {
     const parsed = JSON.parse(raw) as TerminalService[]
     if (Array.isArray(parsed)) {
       services.value = parsed.filter(
-        (s) => s && typeof s.id === 'string' && typeof s.name === 'string' && typeof s.path === 'string'
+        (s) =>
+          s && typeof s.id === 'string' && typeof s.name === 'string' && typeof s.path === 'string'
       )
     }
   } catch {
@@ -67,8 +71,13 @@ function openAddDialog(): void {
 }
 
 async function pickFolder(): Promise<void> {
-  const p = await window.api.selectFolder()
-  if (p) form.value.path = p
+  try {
+    const p = await window.api.selectFolder()
+    if (p) form.value.path = p
+  } catch (err) {
+    console.error(err)
+    ElMessage.error('无法打开文件夹选择框')
+  }
 }
 
 async function confirmAdd(): Promise<void> {
@@ -77,11 +86,15 @@ async function confirmAdd(): Promise<void> {
   } catch {
     return
   }
+  const normalizedPath = form.value.path
+    .trim()
+    .replace(/^"(.*)"$/, '$1')
+    .replace(/^'(.*)'$/, '$1')
   const id = crypto.randomUUID()
   const item: TerminalService = {
     id,
     name: form.value.name.trim(),
-    path: form.value.path.trim()
+    path: normalizedPath
   }
   services.value = [...services.value, item]
   selectedId.value = id
@@ -217,13 +230,21 @@ function removeService(id: string, e: Event): void {
         <el-form-item label="路径" prop="path">
           <div class="path-row">
             <el-input v-model="form.path" placeholder="项目目录，或任意文件路径" clearable />
-            <el-button type="primary" plain :icon="FolderOpened" @click="pickFolder">浏览</el-button>
+            <el-button
+              type="primary"
+              plain
+              native-type="button"
+              :icon="FolderOpened"
+              @click.prevent.stop="pickFolder"
+            >
+              浏览
+            </el-button>
           </div>
         </el-form-item>
       </el-form>
       <template #footer>
-        <el-button @click="dialogVisible = false">取消</el-button>
-        <el-button type="primary" @click="confirmAdd">确定</el-button>
+        <el-button native-type="button" @click="dialogVisible = false">取消</el-button>
+        <el-button native-type="button" type="primary" @click="confirmAdd">确定</el-button>
       </template>
     </el-dialog>
   </el-container>
@@ -425,6 +446,7 @@ function removeService(id: string, e: Event): void {
   line-height: 1.4;
   word-break: break-all;
   display: -webkit-box;
+  line-clamp: 2;
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;

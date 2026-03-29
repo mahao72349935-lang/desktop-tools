@@ -34,6 +34,7 @@ const vscodeDarkTerminalTheme = {
 }
 
 const terminalRef = ref<HTMLDivElement>()
+const actualCwd = ref('')
 let terminal: Terminal | null = null
 let fitAddon: FitAddon | null = null
 let disposeData: (() => void) | null = null
@@ -53,6 +54,37 @@ onMounted(async () => {
   fitAddon = new FitAddon()
   terminal.loadAddon(fitAddon)
   terminal.open(terminalRef.value)
+
+  terminal.attachCustomKeyEventHandler((e) => {
+    if (e.type !== 'keydown' || !terminal) return true
+    const ctrlOrCmd = e.ctrlKey || e.metaKey
+    const key = e.key.toLowerCase()
+    const noAlt = !e.altKey
+
+    if (ctrlOrCmd && noAlt && key === 'c') {
+      const selected = terminal.getSelection()
+      const text = selected || window.getSelection()?.toString() || ''
+      if (text) {
+        try {
+          void navigator.clipboard.writeText(text).catch(() => window.api.writeClipboardText(text))
+        } catch {
+          window.api.writeClipboardText(text)
+        }
+        if (terminal.hasSelection()) terminal.clearSelection()
+        return false
+      }
+    }
+
+    if (ctrlOrCmd && noAlt && key === 'v') {
+      const pasted = window.api.readClipboardText()
+      if (pasted) {
+        window.api.sendInput(pasted)
+        return false
+      }
+    }
+
+    return true
+  })
 
   disposeData = window.api.onData((data) => {
     terminal?.write(data)
@@ -77,7 +109,7 @@ onMounted(async () => {
 
   await new Promise((r) => setTimeout(r, 50))
   fitAddon.fit()
-  await window.api.create(terminal.cols, terminal.rows, props.cwd)
+  actualCwd.value = await window.api.create(terminal.cols, terminal.rows, props.cwd)
 })
 
 onUnmounted(() => {
@@ -99,7 +131,7 @@ onUnmounted(() => {
           />
         </svg>
         <span class="tab-title">{{ title }}</span>
-        <span class="tab-cwd" :title="cwd">{{ cwd }}</span>
+        <span class="tab-cwd" :title="actualCwd || cwd">{{ actualCwd || cwd }}</span>
       </div>
     </div>
     <div ref="terminalRef" class="terminal-body"></div>

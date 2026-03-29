@@ -10,6 +10,8 @@ export interface TerminalService {
   name: string
   path: string
   startupCommand?: string
+  /** 开启后在终端工具栏显示「生成日报 / 生成周报」 */
+  reportEnabled?: boolean
 }
 
 const STORAGE_KEY = 'desktop-tools-terminal-services'
@@ -22,7 +24,7 @@ const terminalRenderKey = ref(0)
 
 const dialogVisible = ref(false)
 const formRef = ref<FormInstance>()
-const form = ref({ name: '', path: '', startupCommand: '' })
+const form = ref({ name: '', path: '', startupCommand: '', reportEnabled: false })
 
 const rules: FormRules = {
   name: [{ required: true, message: '请输入服务名称', trigger: 'blur' }],
@@ -45,7 +47,8 @@ function loadServices(): void {
           typeof s.id === 'string' &&
           typeof s.name === 'string' &&
           typeof s.path === 'string' &&
-          (s.startupCommand === undefined || typeof s.startupCommand === 'string')
+          (s.startupCommand === undefined || typeof s.startupCommand === 'string') &&
+          (s.reportEnabled === undefined || typeof s.reportEnabled === 'boolean')
       )
     }
   } catch {
@@ -96,7 +99,7 @@ function serviceRunning(id: string): boolean {
 }
 
 function openAddDialog(): void {
-  form.value = { name: '', path: '', startupCommand: '' }
+  form.value = { name: '', path: '', startupCommand: '', reportEnabled: false }
   dialogVisible.value = true
 }
 
@@ -125,7 +128,8 @@ async function confirmAdd(): Promise<void> {
     id,
     name: form.value.name.trim(),
     path: normalizedPath,
-    startupCommand: form.value.startupCommand.trim() || undefined
+    startupCommand: form.value.startupCommand.trim() || undefined,
+    reportEnabled: form.value.reportEnabled
   }
   services.value = [...services.value, item]
   statusMap.value = { ...statusMap.value, [id]: false }
@@ -159,50 +163,63 @@ function restartSelected(): void {
   void window.api.destroy(selectedId.value)
   terminalRenderKey.value += 1
 }
+
+/** Ctrl+C，用于结束前台任务（如 pnpm dev） */
+const CTRL_C = '\x03'
+
+function runReportCommand(kind: 'daily' | 'weekly'): void {
+  if (!selectedService.value) return
+  if (!selectedRunning.value) {
+    ElMessage.warning('请先启动终端（会话未运行）')
+    return
+  }
+  const id = selectedService.value.id
+  const line = kind === 'daily' ? 'pnpm daily\r' : 'pnpm weekly\r'
+  window.api.sendInput(id, CTRL_C)
+  window.setTimeout(() => {
+    window.api.sendInput(id, line)
+  }, 120)
+}
 </script>
 
 <template>
   <el-container class="layout-root">
     <el-aside width="240px" class="layout-aside">
-      <div class="aside-brand">
-        <div class="brand-title">开发工作台</div>
-        <div class="brand-sub">本地服务管理</div>
-      </div>
-      <el-divider class="aside-divider" />
-      <el-menu
-        :default-active="activeMenu"
-        class="aside-menu"
-        background-color="transparent"
-        text-color="#b8b8b8"
-        active-text-color="#409eff"
-      >
+      <el-menu :default-active="activeMenu" class="aside-menu" background-color="transparent" text-color="#b8b8b8"
+        active-text-color="#409eff">
         <el-menu-item index="services" class="aside-menu-item">
-          <el-icon><Coin /></el-icon>
+          <el-icon>
+            <Coin />
+          </el-icon>
           <span>服务管理</span>
         </el-menu-item>
         <el-menu-item index="monitor" class="aside-menu-item">
-          <el-icon><Monitor /></el-icon>
+          <el-icon>
+            <Monitor />
+          </el-icon>
           <span>系统监控</span>
         </el-menu-item>
         <el-menu-item index="todo" class="aside-menu-item">
-          <el-icon><CircleCheck /></el-icon>
+          <el-icon>
+            <CircleCheck />
+          </el-icon>
           <span>待完成事项</span>
         </el-menu-item>
         <el-menu-item index="settings" class="aside-menu-item">
-          <el-icon><Setting /></el-icon>
+          <el-icon>
+            <Setting />
+          </el-icon>
           <span>设置</span>
         </el-menu-item>
       </el-menu>
-      <div class="aside-footer">
-        <el-button type="primary" class="add-service-btn" round @click="openAddDialog">
-          + 添加服务
-        </el-button>
-      </div>
     </el-aside>
 
     <el-container direction="vertical" class="layout-right">
       <el-header class="layout-header">
-        <div class="header-title">服务管理</div>
+        <div class="header-top">
+          <div class="header-title">服务管理</div>
+          <el-button type="primary" round @click="openAddDialog">+ 添加服务</el-button>
+        </div>
         <div class="header-status">
           <span class="status-item">
             <span class="dot dot-green" />
@@ -218,32 +235,17 @@ function restartSelected(): void {
 
       <el-main class="layout-main">
         <section class="cards-strip">
-          <div v-if="!services.length" class="cards-empty">暂无服务，点击左侧「添加服务」创建</div>
+          <div v-if="!services.length" class="cards-empty">暂无服务，点击右上角「添加服务」创建</div>
           <div v-else class="cards-scroll">
-            <el-card
-              v-for="s in services"
-              :key="s.id"
-              class="service-card"
-              :class="{ 'is-active': s.id === selectedId }"
-              shadow="hover"
-              @click="selectService(s.id)"
-            >
+            <el-card v-for="s in services" :key="s.id" class="service-card"
+              :class="{ 'is-active': s.id === selectedId }" shadow="hover" @click="selectService(s.id)">
               <template #header>
                 <div class="card-head">
                   <div class="card-name-wrap">
-                    <span
-                      class="card-service-dot"
-                      :class="serviceRunning(s.id) ? 'is-running' : 'is-stopped'"
-                    />
+                    <span class="card-service-dot" :class="serviceRunning(s.id) ? 'is-running' : 'is-stopped'" />
                     <span class="card-name">{{ s.name }}</span>
                   </div>
-                  <el-button
-                    type="danger"
-                    link
-                    size="small"
-                    class="card-remove"
-                    @click="removeService(s.id, $event)"
-                  >
+                  <el-button type="danger" link size="small" class="card-remove" @click="removeService(s.id, $event)">
                     删除
                   </el-button>
                 </div>
@@ -262,39 +264,27 @@ function restartSelected(): void {
           <div v-else class="terminal-stack">
             <div class="terminal-toolbar">
               <span class="toolbar-status">
-                <span
-                  class="card-service-dot"
-                  :class="selectedRunning ? 'is-running' : 'is-stopped'"
-                />
+                <span class="card-service-dot" :class="selectedRunning ? 'is-running' : 'is-stopped'" />
                 {{ selectedRunning ? '运行中' : '已停止' }}
               </span>
               <div class="toolbar-actions">
+                <template v-if="selectedService?.reportEnabled">
+                  <el-button size="small" @click="runReportCommand('daily')">生成日报</el-button>
+                  <el-button size="small" @click="runReportCommand('weekly')">生成周报</el-button>
+                </template>
                 <el-button size="small" @click="restartSelected">重启</el-button>
                 <el-button size="small" type="danger" plain @click="stopSelected">停止</el-button>
               </div>
             </div>
-            <Terminal
-              v-if="selectedService"
-              :key="`${selectedService.id}-${terminalRenderKey}`"
-              :session-id="selectedService.id"
-              :cwd="selectedService.path"
-              :title="selectedService.name"
-              :startup-command="selectedService.startupCommand"
-              :active="true"
-            />
+            <Terminal v-if="selectedService" :key="`${selectedService.id}-${terminalRenderKey}`"
+              :session-id="selectedService.id" :cwd="selectedService.path" :title="selectedService.name"
+              :startup-command="selectedService.startupCommand" :active="true" />
           </div>
         </div>
       </el-main>
     </el-container>
 
-    <el-dialog
-      v-model="dialogVisible"
-      title="添加服务"
-      width="480px"
-      class="add-dialog"
-      append-to-body
-      destroy-on-close
-    >
+    <el-dialog v-model="dialogVisible" title="添加服务" width="480px" class="add-dialog" append-to-body destroy-on-close>
       <el-form ref="formRef" :model="form" :rules="rules" label-width="88px" @submit.prevent>
         <el-form-item label="名称" prop="name">
           <el-input v-model="form.name" placeholder="例如：前端 dev server" clearable />
@@ -302,19 +292,17 @@ function restartSelected(): void {
         <el-form-item label="路径" prop="path">
           <div class="path-row">
             <el-input v-model="form.path" placeholder="项目目录，或任意文件路径" clearable />
-            <el-button
-              type="primary"
-              plain
-              native-type="button"
-              :icon="FolderOpened"
-              @click.prevent.stop="pickFolder"
-            >
+            <el-button type="primary" plain native-type="button" :icon="FolderOpened" @click.prevent.stop="pickFolder">
               浏览
             </el-button>
           </div>
         </el-form-item>
         <el-form-item label="启动命令">
           <el-input v-model="form.startupCommand" placeholder="例如：pnpm dev（可选）" clearable />
+        </el-form-item>
+        <el-form-item label="日报周报">
+          <el-switch v-model="form.reportEnabled" active-text="开启" inactive-text="关闭" />
+          <span class="form-hint">开启后可在终端工具栏使用「生成日报 / 生成周报」（默认 pnpm daily / pnpm weekly）</span>
         </el-form-item>
       </el-form>
       <template #footer>
@@ -336,29 +324,6 @@ function restartSelected(): void {
   flex-direction: column;
   background: #1e1e1e;
   border-right: 1px solid #3c3c3c;
-}
-
-.aside-brand {
-  padding: 20px 16px 12px;
-  flex-shrink: 0;
-}
-
-.brand-title {
-  font-size: 18px;
-  font-weight: 700;
-  color: #409eff;
-  letter-spacing: 0.02em;
-}
-
-.brand-sub {
-  margin-top: 6px;
-  font-size: 12px;
-  color: #8a8a8a;
-}
-
-.aside-divider {
-  margin: 0 12px;
-  border-color: #3c3c3c;
 }
 
 .aside-menu {
@@ -384,16 +349,6 @@ function restartSelected(): void {
   background: rgba(255, 255, 255, 0.06);
 }
 
-.aside-footer {
-  padding: 12px 14px 16px;
-  flex-shrink: 0;
-}
-
-.add-service-btn {
-  width: 100%;
-  font-weight: 500;
-}
-
 .layout-right {
   min-width: 0;
   background: #1e1e1e;
@@ -407,15 +362,31 @@ function restartSelected(): void {
   background: #252526;
   display: flex;
   flex-direction: column;
-  align-items: flex-start;
+  align-items: stretch;
   justify-content: center;
   gap: 10px;
+}
+
+.header-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
 }
 
 .header-title {
   font-size: 15px;
   font-weight: 600;
   color: #e0e0e0;
+}
+
+.form-hint {
+  display: block;
+  margin-top: 6px;
+  font-size: 12px;
+  color: #8a8a8a;
+  line-height: 1.4;
 }
 
 .header-status {
@@ -606,6 +577,9 @@ function restartSelected(): void {
 
 .toolbar-actions {
   display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
   gap: 8px;
 }
 

@@ -1,5 +1,13 @@
 import { ElectronAPI } from '@electron-toolkit/preload'
 
+interface OccupiedPort {
+  port: number
+  pid: number
+  protocol: 'TCP' | 'UDP'
+  address: string
+  state?: string
+}
+
 interface TerminalApi {
   create: (
     sessionId: string,
@@ -18,6 +26,8 @@ interface TerminalApi {
   onExit: (sessionId: string, callback: (exitCode: number) => void) => () => void
   sendInput: (sessionId: string, data: string) => void
   resize: (sessionId: string, cols: number, rows: number) => void
+  listPorts: () => Promise<OccupiedPort[]>
+  closePort: (port: number) => Promise<{ ok: boolean; killedPids: number[]; message?: string }>
 }
 
 declare global {

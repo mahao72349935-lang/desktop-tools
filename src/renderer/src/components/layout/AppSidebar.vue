@@ -7,6 +7,10 @@ withDefaults(
   }>(),
   { activeMenu: 'services' }
 )
+
+const emit = defineEmits<{
+  select: [menu: string]
+}>()
 </script>
 
 <template>
@@ -17,21 +21,30 @@ withDefaults(
       background-color="transparent"
       text-color="#b8b8b8"
       active-text-color="#409eff"
+      @select="(index) => emit('select', String(index))"
     >
       <el-menu-item index="services" class="aside-menu-item">
-        <el-icon><Coin /></el-icon>
+        <el-icon>
+          <Coin />
+        </el-icon>
         <span>服务管理</span>
       </el-menu-item>
       <el-menu-item index="monitor" class="aside-menu-item">
-        <el-icon><Monitor /></el-icon>
-        <span>系统监控</span>
+        <el-icon>
+          <Monitor />
+        </el-icon>
+        <span>端口列表</span>
       </el-menu-item>
       <el-menu-item index="todo" class="aside-menu-item">
-        <el-icon><CircleCheck /></el-icon>
+        <el-icon>
+          <CircleCheck />
+        </el-icon>
         <span>待完成事项</span>
       </el-menu-item>
       <el-menu-item index="settings" class="aside-menu-item">
-        <el-icon><Setting /></el-icon>
+        <el-icon>
+          <Setting />
+        </el-icon>
         <span>设置</span>
       </el-menu-item>
     </el-menu>

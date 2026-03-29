@@ -4,7 +4,9 @@ import { ElMessage } from 'element-plus'
 import AppSidebar from './layout/AppSidebar.vue'
 import ServiceManageHeader from './layout/ServiceManageHeader.vue'
 import TerminalPanel from './layout/TerminalPanel.vue'
+import PortListPanel from './layout/PortListPanel.vue'
 import type { NewTerminalServiceInput, TerminalService } from '../types/terminal-service'
+import type { OccupiedPort } from '../types/system-port'
 
 export type { NewTerminalServiceInput, TerminalService }
 
@@ -15,6 +17,8 @@ const services = ref<TerminalService[]>([])
 const selectedId = ref<string | null>(null)
 const statusMap = ref<Record<string, boolean>>({})
 const terminalRenderKey = ref(0)
+const occupiedPorts = ref<OccupiedPort[]>([])
+const portsLoading = ref(false)
 
 const selectedService = computed(
   () => services.value.find((s) => s.id === selectedId.value) ?? null
@@ -133,22 +137,53 @@ function runReportCommand(kind: 'daily' | 'weekly'): void {
     window.api.sendInput(id, line)
   }, 120)
 }
+
+async function refreshPorts(): Promise<void> {
+  portsLoading.value = true
+  try {
+    occupiedPorts.value = await window.api.listPorts()
+  } catch (err) {
+    console.error(err)
+    ElMessage.error('读取端口失败')
+  } finally {
+    portsLoading.value = false
+  }
+}
+
+function handleMenuSelect(menu: string): void {
+  activeMenu.value = menu
+  if (menu === 'monitor') {
+    void refreshPorts()
+  }
+}
+
+async function closePort(port: number): Promise<void> {
+  const result = await window.api.closePort(port)
+  if (result.ok) {
+    ElMessage.success(`端口 ${port} 已关闭`)
+    await refreshPorts()
+    return
+  }
+  ElMessage.warning(result.message || `端口 ${port} 关闭失败`)
+}
 </script>
 
 <template>
   <el-container class="layout-root">
-    <AppSidebar :active-menu="activeMenu" />
+    <AppSidebar :active-menu="activeMenu" @select="handleMenuSelect" />
 
     <el-container direction="vertical" class="layout-right">
       <ServiceManageHeader
+        v-if="activeMenu === 'services'"
         :running-count="runningCount"
         :stopped-count="stoppedCount"
         :service-total="services.length"
         @add-service="handleAddService"
       />
+      <el-header v-else class="monitor-header">端口列表</el-header>
 
       <el-main class="layout-main">
-        <section class="cards-strip">
+        <section v-if="activeMenu === 'services'" class="cards-strip">
           <div v-if="!services.length" class="cards-empty">
             暂无服务，点击右上角「添加服务」创建
           </div>
@@ -188,6 +223,7 @@ function runReportCommand(kind: 'daily' | 'weekly'): void {
         </section>
 
         <TerminalPanel
+          v-if="activeMenu === 'services'"
           :selected-service="selectedService"
           :selected-running="selectedRunning"
           :terminal-render-key="terminalRenderKey"
@@ -196,6 +232,16 @@ function runReportCommand(kind: 'daily' | 'weekly'): void {
           @report-daily="runReportCommand('daily')"
           @report-weekly="runReportCommand('weekly')"
         />
+
+        <PortListPanel
+          v-else-if="activeMenu === 'monitor'"
+          :ports="occupiedPorts"
+          :loading="portsLoading"
+          @refresh="refreshPorts"
+          @close="closePort"
+        />
+
+        <div v-else class="cards-empty">该菜单功能开发中</div>
       </el-main>
     </el-container>
   </el-container>
@@ -210,6 +256,17 @@ function runReportCommand(kind: 'daily' | 'weekly'): void {
 .layout-right {
   min-width: 0;
   background: #1e1e1e;
+}
+
+.monitor-header {
+  height: auto !important;
+  min-height: unset !important;
+  padding: 16px 20px 14px;
+  border-bottom: 1px solid #3c3c3c;
+  background: #252526;
+  color: #e0e0e0;
+  font-size: 15px;
+  font-weight: 600;
 }
 
 .cards-strip {

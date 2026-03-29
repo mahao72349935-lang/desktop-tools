@@ -1,6 +1,14 @@
 import { contextBridge, ipcRenderer, clipboard } from 'electron'
 import { electronAPI } from '@electron-toolkit/preload'
 
+export interface OccupiedPort {
+  port: number
+  pid: number
+  protocol: 'TCP' | 'UDP'
+  address: string
+  state?: string
+}
+
 const terminalApi = {
   create: (
     sessionId: string,
@@ -70,7 +78,12 @@ const terminalApi = {
 
   resize: (sessionId: string, cols: number, rows: number): void => {
     ipcRenderer.send('terminal:resize', sessionId, cols, rows)
-  }
+  },
+
+  listPorts: (): Promise<OccupiedPort[]> => ipcRenderer.invoke('system:list-ports'),
+
+  closePort: (port: number): Promise<{ ok: boolean; killedPids: number[]; message?: string }> =>
+    ipcRenderer.invoke('system:close-port', port)
 }
 
 if (process.contextIsolated) {

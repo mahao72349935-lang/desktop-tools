@@ -2,6 +2,7 @@ import { app, shell, BrowserWindow, ipcMain, dialog, type OpenDialogOptions } fr
 import path, { dirname, join } from 'path'
 import os from 'os'
 import fs from 'fs'
+import { exec } from 'child_process'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import icon from '../../resources/icon.png?asset'
 import * as pty from 'node-pty'
@@ -17,6 +18,137 @@ interface TerminalSession {
 }
 
 const terminalSessions = new Map<string, TerminalSession>()
+
+interface OccupiedPort {
+  port: number
+  pid: number
+  protocol: 'TCP' | 'UDP'
+  address: string
+  state?: string
+}
+
+function execText(command: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    exec(command, { windowsHide: true, maxBuffer: 1024 * 1024 * 8 }, (error, stdout) => {
+      if (error) {
+        reject(error)
+        return
+      }
+      resolve(stdout)
+    })
+  })
+}
+
+function parsePortFromAddress(address: string): number | null {
+  const matched = address.match(/:(\d+)$/)
+  if (!matched) return null
+  const port = Number.parseInt(matched[1], 10)
+  return Number.isFinite(port) ? port : null
+}
+
+async function listOccupiedPortsWindows(): Promise<OccupiedPort[]> {
+  const raw = await execText('netstat -ano -p tcp && netstat -ano -p udp')
+  const lines = raw
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.startsWith('TCP') || line.startsWith('UDP'))
+
+  const map = new Map<string, OccupiedPort>()
+
+  for (const line of lines) {
+    const cols = line.split(/\s+/)
+    const protocol = cols[0] as 'TCP' | 'UDP'
+    if (protocol === 'TCP') {
+      const localAddress = cols[1]
+      const state = cols[3]
+      const pid = Number.parseInt(cols[4] ?? '', 10)
+      if (state !== 'LISTENING' || !Number.isFinite(pid)) continue
+      const port = parsePortFromAddress(localAddress)
+      if (!port) continue
+      map.set(`${protocol}-${port}-${pid}`, { port, pid, protocol, address: localAddress, state })
+      continue
+    }
+
+    const localAddress = cols[1]
+    const pid = Number.parseInt(cols[3] ?? '', 10)
+    if (!Number.isFinite(pid)) continue
+    const port = parsePortFromAddress(localAddress)
+    if (!port) continue
+    map.set(`${protocol}-${port}-${pid}`, { port, pid, protocol, address: localAddress })
+  }
+
+  return [...map.values()].sort((a, b) => a.port - b.port || a.pid - b.pid)
+}
+
+async function listOccupiedPortsPosix(): Promise<OccupiedPort[]> {
+  const raw = await execText("lsof -nP -iTCP -sTCP:LISTEN -iUDP | awk 'NR>1'")
+  const lines = raw
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+  const map = new Map<string, OccupiedPort>()
+
+  for (const line of lines) {
+    const cols = line.split(/\s+/)
+    const pid = Number.parseInt(cols[1] ?? '', 10)
+    if (!Number.isFinite(pid)) continue
+    const nameColumn = cols.find((c) => c.includes('TCP') || c.includes('UDP'))
+    if (!nameColumn) continue
+    const protocol: 'TCP' | 'UDP' = nameColumn.includes('UDP') ? 'UDP' : 'TCP'
+    const addrCol = cols[cols.length - 2] ?? cols[cols.length - 1]
+    const port = parsePortFromAddress(addrCol)
+    if (!port) continue
+    map.set(`${protocol}-${port}-${pid}`, { port, pid, protocol, address: addrCol })
+  }
+
+  return [...map.values()].sort((a, b) => a.port - b.port || a.pid - b.pid)
+}
+
+async function listOccupiedPorts(): Promise<OccupiedPort[]> {
+  try {
+    if (process.platform === 'win32') {
+      return await listOccupiedPortsWindows()
+    }
+    return await listOccupiedPortsPosix()
+  } catch (err) {
+    console.error('[ports] list failed', err)
+    return []
+  }
+}
+
+async function closePort(
+  port: number
+): Promise<{ ok: boolean; killedPids: number[]; message?: string }> {
+  if (!Number.isFinite(port) || port <= 0) {
+    return { ok: false, killedPids: [], message: '端口号不合法' }
+  }
+  const occupied = await listOccupiedPorts()
+  const targets = [
+    ...new Set(occupied.filter((item) => item.port === port).map((item) => item.pid))
+  ]
+  if (targets.length === 0) {
+    return { ok: false, killedPids: [], message: `端口 ${port} 未被占用` }
+  }
+
+  const killedPids: number[] = []
+  for (const pid of targets) {
+    try {
+      if (process.platform === 'win32') {
+        await execText(`taskkill /PID ${pid} /F`)
+      } else {
+        await execText(`kill -9 ${pid}`)
+      }
+      killedPids.push(pid)
+    } catch (err) {
+      console.error(`[ports] kill pid failed: ${pid}`, err)
+    }
+  }
+
+  if (killedPids.length === 0) {
+    return { ok: false, killedPids: [], message: `端口 ${port} 关闭失败` }
+  }
+  return { ok: true, killedPids }
+}
 
 function sendSessionStatus(
   webContents: Electron.WebContents,
@@ -268,6 +400,14 @@ function setupTerminalIpc(): void {
       sendSessionStatus(target.webContents, sessionId, false)
     }
     return true
+  })
+
+  ipcMain.handle('system:list-ports', async () => {
+    return await listOccupiedPorts()
+  })
+
+  ipcMain.handle('system:close-port', async (_event, port: number) => {
+    return await closePort(port)
   })
 }
 

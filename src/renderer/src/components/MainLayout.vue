@@ -9,6 +9,7 @@ export interface TerminalService {
   id: string
   name: string
   path: string
+  startupCommand?: string
 }
 
 const STORAGE_KEY = 'desktop-tools-terminal-services'
@@ -16,10 +17,12 @@ const STORAGE_KEY = 'desktop-tools-terminal-services'
 const activeMenu = ref('services')
 const services = ref<TerminalService[]>([])
 const selectedId = ref<string | null>(null)
+const statusMap = ref<Record<string, boolean>>({})
+const terminalRenderKey = ref(0)
 
 const dialogVisible = ref(false)
 const formRef = ref<FormInstance>()
-const form = ref({ name: '', path: '' })
+const form = ref({ name: '', path: '', startupCommand: '' })
 
 const rules: FormRules = {
   name: [{ required: true, message: '请输入服务名称', trigger: 'blur' }],
@@ -38,7 +41,11 @@ function loadServices(): void {
     if (Array.isArray(parsed)) {
       services.value = parsed.filter(
         (s) =>
-          s && typeof s.id === 'string' && typeof s.name === 'string' && typeof s.path === 'string'
+          s &&
+          typeof s.id === 'string' &&
+          typeof s.name === 'string' &&
+          typeof s.path === 'string' &&
+          (s.startupCommand === undefined || typeof s.startupCommand === 'string')
       )
     }
   } catch {
@@ -52,6 +59,20 @@ function saveServices(): void {
 
 onMounted(() => {
   loadServices()
+  for (const s of services.value) {
+    statusMap.value[s.id] = false
+  }
+  if (services.value.length && !selectedId.value) {
+    selectedId.value = services.value[0].id
+  }
+  void Promise.all(
+    services.value.map(async (s) => {
+      statusMap.value[s.id] = await window.api.getStatus(s.id)
+    })
+  )
+  window.api.onStatus(({ sessionId, running }) => {
+    statusMap.value = { ...statusMap.value, [sessionId]: running }
+  })
 })
 
 watch(
@@ -62,11 +83,20 @@ watch(
   { deep: true }
 )
 
-const runningCount = computed(() => (selectedService.value ? 1 : 0))
+const runningCount = computed(
+  () => services.value.filter((s) => Boolean(statusMap.value[s.id])).length
+)
 const stoppedCount = computed(() => Math.max(0, services.value.length - runningCount.value))
+const selectedRunning = computed(() =>
+  Boolean(selectedService.value && statusMap.value[selectedService.value.id])
+)
+
+function serviceRunning(id: string): boolean {
+  return Boolean(statusMap.value[id])
+}
 
 function openAddDialog(): void {
-  form.value = { name: '', path: '' }
+  form.value = { name: '', path: '', startupCommand: '' }
   dialogVisible.value = true
 }
 
@@ -94,9 +124,11 @@ async function confirmAdd(): Promise<void> {
   const item: TerminalService = {
     id,
     name: form.value.name.trim(),
-    path: normalizedPath
+    path: normalizedPath,
+    startupCommand: form.value.startupCommand.trim() || undefined
   }
   services.value = [...services.value, item]
+  statusMap.value = { ...statusMap.value, [id]: false }
   selectedId.value = id
   dialogVisible.value = false
 }
@@ -107,10 +139,25 @@ function selectService(id: string): void {
 
 function removeService(id: string, e: Event): void {
   e.stopPropagation()
+  void window.api.destroy(id)
   services.value = services.value.filter((s) => s.id !== id)
+  const nextStatus = { ...statusMap.value }
+  delete nextStatus[id]
+  statusMap.value = nextStatus
   if (selectedId.value === id) {
     selectedId.value = services.value[0]?.id ?? null
   }
+}
+
+function stopSelected(): void {
+  if (!selectedId.value) return
+  void window.api.destroy(selectedId.value)
+}
+
+function restartSelected(): void {
+  if (!selectedId.value) return
+  void window.api.destroy(selectedId.value)
+  terminalRenderKey.value += 1
 }
 </script>
 
@@ -183,7 +230,13 @@ function removeService(id: string, e: Event): void {
             >
               <template #header>
                 <div class="card-head">
-                  <span class="card-name">{{ s.name }}</span>
+                  <div class="card-name-wrap">
+                    <span
+                      class="card-service-dot"
+                      :class="serviceRunning(s.id) ? 'is-running' : 'is-stopped'"
+                    />
+                    <span class="card-name">{{ s.name }}</span>
+                  </div>
                   <el-button
                     type="danger"
                     link
@@ -196,21 +249,40 @@ function removeService(id: string, e: Event): void {
                 </div>
               </template>
               <div class="card-path" :title="s.path">{{ s.path }}</div>
+              <div class="card-command">{{ s.startupCommand || '无预设启动命令' }}</div>
             </el-card>
           </div>
         </section>
 
         <div class="terminal-wrap">
-          <div v-if="!selectedService" class="terminal-placeholder">
+          <div v-if="!services.length || !selectedId" class="terminal-placeholder">
             <p>请选择一个服务卡片以打开终端</p>
             <p class="hint">终端会在该服务的目录下启动（路径为文件时会使用其所在文件夹）</p>
           </div>
-          <Terminal
-            v-else
-            :key="selectedService.id"
-            :cwd="selectedService.path"
-            :title="selectedService.name"
-          />
+          <div v-else class="terminal-stack">
+            <div class="terminal-toolbar">
+              <span class="toolbar-status">
+                <span
+                  class="card-service-dot"
+                  :class="selectedRunning ? 'is-running' : 'is-stopped'"
+                />
+                {{ selectedRunning ? '运行中' : '已停止' }}
+              </span>
+              <div class="toolbar-actions">
+                <el-button size="small" @click="restartSelected">重启</el-button>
+                <el-button size="small" type="danger" plain @click="stopSelected">停止</el-button>
+              </div>
+            </div>
+            <Terminal
+              v-if="selectedService"
+              :key="`${selectedService.id}-${terminalRenderKey}`"
+              :session-id="selectedService.id"
+              :cwd="selectedService.path"
+              :title="selectedService.name"
+              :startup-command="selectedService.startupCommand"
+              :active="true"
+            />
+          </div>
         </div>
       </el-main>
     </el-container>
@@ -240,6 +312,9 @@ function removeService(id: string, e: Event): void {
               浏览
             </el-button>
           </div>
+        </el-form-item>
+        <el-form-item label="启动命令">
+          <el-input v-model="form.startupCommand" placeholder="例如：pnpm dev（可选）" clearable />
         </el-form-item>
       </el-form>
       <template #footer>
@@ -428,6 +503,30 @@ function removeService(id: string, e: Event): void {
   min-width: 0;
 }
 
+.card-name-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.card-service-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: #6e7681;
+}
+
+.card-service-dot.is-running {
+  background: #3fb950;
+  box-shadow: 0 0 0 1px rgba(63, 185, 80, 0.35);
+}
+
+.card-service-dot.is-stopped {
+  background: #6e7681;
+}
+
 .card-name {
   font-weight: 600;
   color: #e0e0e0;
@@ -452,6 +551,15 @@ function removeService(id: string, e: Event): void {
   overflow: hidden;
 }
 
+.card-command {
+  margin-top: 8px;
+  font-size: 11px;
+  color: #7f8c9f;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .layout-main {
   padding: 10px 12px 12px;
   overflow: hidden;
@@ -468,6 +576,37 @@ function removeService(id: string, e: Event): void {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+}
+
+.terminal-stack {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.terminal-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+  padding: 6px 8px;
+  border: 1px solid #3c3c3c;
+  border-radius: 6px;
+  background: #252526;
+}
+
+.toolbar-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: #c8c8c8;
+}
+
+.toolbar-actions {
+  display: inline-flex;
+  gap: 8px;
 }
 
 .terminal-placeholder {

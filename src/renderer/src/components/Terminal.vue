@@ -1,12 +1,15 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted } from 'vue'
+import { ref, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import '@xterm/xterm/css/xterm.css'
 
 const props = defineProps<{
+  sessionId: string
   cwd: string
   title: string
+  active: boolean
+  startupCommand?: string
 }>()
 
 /** VS Code 默认 Dark 主题终端色（见 vscode terminalColorRegistry ansiColorMap） */
@@ -40,6 +43,10 @@ let fitAddon: FitAddon | null = null
 let disposeData: (() => void) | null = null
 let disposeExit: (() => void) | null = null
 let resizeObserver: ResizeObserver | null = null
+
+function focusTerminal(): void {
+  terminal?.focus()
+}
 
 onMounted(async () => {
   if (!terminalRef.value) return
@@ -78,7 +85,7 @@ onMounted(async () => {
     if (ctrlOrCmd && noAlt && key === 'v') {
       const pasted = window.api.readClipboardText()
       if (pasted) {
-        window.api.sendInput(pasted)
+        window.api.sendInput(props.sessionId, pasted)
         return false
       }
     }
@@ -86,20 +93,20 @@ onMounted(async () => {
     return true
   })
 
-  disposeData = window.api.onData((data) => {
+  disposeData = window.api.onData(props.sessionId, (data) => {
     terminal?.write(data)
   })
 
-  disposeExit = window.api.onExit(() => {
+  disposeExit = window.api.onExit(props.sessionId, () => {
     terminal?.write('\r\n[进程已退出]')
   })
 
   terminal.onData((data) => {
-    window.api.sendInput(data)
+    window.api.sendInput(props.sessionId, data)
   })
 
   terminal.onResize(({ cols, rows }) => {
-    window.api.resize(cols, rows)
+    window.api.resize(props.sessionId, cols, rows)
   })
 
   resizeObserver = new ResizeObserver(() => {
@@ -109,8 +116,28 @@ onMounted(async () => {
 
   await new Promise((r) => setTimeout(r, 50))
   fitAddon.fit()
-  actualCwd.value = await window.api.create(terminal.cols, terminal.rows, props.cwd)
+  actualCwd.value = await window.api.create(
+    props.sessionId,
+    terminal.cols,
+    terminal.rows,
+    props.cwd,
+    props.startupCommand
+  )
+  if (props.active) {
+    terminal.focus()
+  }
 })
+
+watch(
+  () => props.active,
+  async (active) => {
+    if (!active || !terminal || !fitAddon) return
+    await nextTick()
+    fitAddon.fit()
+    terminal.focus()
+    window.api.resize(props.sessionId, terminal.cols, terminal.rows)
+  }
+)
 
 onUnmounted(() => {
   disposeData?.()
@@ -121,7 +148,7 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="terminal-container">
+  <div class="terminal-container" @mousedown="focusTerminal">
     <div class="terminal-header">
       <div class="terminal-tab">
         <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">

@@ -10,7 +10,23 @@ process.on('uncaughtException', (err) => {
   console.error('[uncaughtException]', err.message)
 })
 
-let ptyProcess: pty.IPty | null = null
+interface TerminalSession {
+  process: pty.IPty
+  cwd: string
+  senderId: number
+}
+
+const terminalSessions = new Map<string, TerminalSession>()
+
+function sendSessionStatus(
+  webContents: Electron.WebContents,
+  sessionId: string,
+  running: boolean
+): void {
+  if (!webContents.isDestroyed()) {
+    webContents.send('terminal:status', { sessionId, running })
+  }
+}
 
 function pathExists(p: string): boolean {
   try {
@@ -104,9 +120,13 @@ function createWindow(): void {
   }
 
   mainWindow.on('closed', () => {
-    if (ptyProcess) {
-      ptyProcess.kill()
-      ptyProcess = null
+    for (const [sessionId, session] of terminalSessions.entries()) {
+      try {
+        session.process.kill()
+      } catch {
+        /* ignore */
+      }
+      terminalSessions.delete(sessionId)
     }
   })
 }
@@ -122,84 +142,132 @@ function setupTerminalIpc(): void {
     return filePaths[0]
   })
 
-  ipcMain.handle('terminal:create', (event, cols: number, rows: number, cwd?: string) => {
-    if (ptyProcess) {
+  ipcMain.handle(
+    'terminal:create',
+    (
+      event,
+      sessionId: string,
+      cols: number,
+      rows: number,
+      cwd?: string,
+      startupCommand?: string
+    ) => {
+      if (!sessionId) return ''
+
+      const existing = terminalSessions.get(sessionId)
+      if (existing) {
+        try {
+          existing.process.resize(cols || 80, rows || 24)
+        } catch {
+          /* ignore */
+        }
+        sendSessionStatus(event.sender, sessionId, true)
+        return existing.cwd
+      }
+
+      const workdir = resolveTerminalCwd(cwd)
+      const shellPath =
+        process.platform === 'win32' ? 'powershell.exe' : process.env.SHELL || 'bash'
+      const shellArgs =
+        process.platform === 'win32'
+          ? [
+              '-NoLogo',
+              '-NoProfile',
+              '-ExecutionPolicy',
+              'Bypass',
+              '-NoExit',
+              '-Command',
+              `Set-Location -LiteralPath '${workdir.replace(/'/g, "''")}'`
+            ]
+          : []
+
+      const termEnv: Record<string, string> = {
+        ...(process.env as Record<string, string>),
+        TERM: 'xterm-256color',
+        COLORTERM: 'truecolor',
+        ...(process.platform === 'win32'
+          ? {
+              POWERSHELL_UPDATECHECK: 'Off',
+              POWERSHELL_TELEMETRY_OPTOUT: '1'
+            }
+          : {})
+      }
+
+      let ptyProcess: pty.IPty
       try {
-        ptyProcess.kill()
-      } catch {
-        /* ignore */
+        ptyProcess = pty.spawn(shellPath, shellArgs, {
+          name: 'xterm-256color',
+          cols: cols || 80,
+          rows: rows || 24,
+          cwd: workdir,
+          env: termEnv
+        })
+      } catch (err) {
+        console.error('Failed to spawn pty:', err)
+        return ''
       }
-      ptyProcess = null
-    }
 
-    const workdir = resolveTerminalCwd(cwd)
-    const shellPath = process.platform === 'win32' ? 'powershell.exe' : process.env.SHELL || 'bash'
-    const shellArgs =
-      process.platform === 'win32'
-        ? [
-            '-NoLogo',
-            '-NoProfile',
-            '-ExecutionPolicy',
-            'Bypass',
-            '-NoExit',
-            '-Command',
-            `Set-Location -LiteralPath '${workdir.replace(/'/g, "''")}'`
-          ]
-        : []
+      const webContents = event.sender
 
-    const termEnv: Record<string, string> = {
-      ...(process.env as Record<string, string>),
-      TERM: 'xterm-256color',
-      COLORTERM: 'truecolor',
-      ...(process.platform === 'win32'
-        ? {
-            POWERSHELL_UPDATECHECK: 'Off',
-            POWERSHELL_TELEMETRY_OPTOUT: '1'
-          }
-        : {})
-    }
-
-    try {
-      ptyProcess = pty.spawn(shellPath, shellArgs, {
-        name: 'xterm-256color',
-        cols: cols || 80,
-        rows: rows || 24,
+      terminalSessions.set(sessionId, {
+        process: ptyProcess,
         cwd: workdir,
-        env: termEnv
+        senderId: webContents.id
       })
-    } catch (err) {
-      console.error('Failed to spawn pty:', err)
-      return ''
+      sendSessionStatus(webContents, sessionId, true)
+
+      ptyProcess.onData((data) => {
+        if (!webContents.isDestroyed()) {
+          webContents.send('terminal:data', { sessionId, data })
+        }
+      })
+
+      ptyProcess.onExit(({ exitCode }) => {
+        if (!webContents.isDestroyed()) {
+          webContents.send('terminal:exit', { sessionId, exitCode })
+        }
+        terminalSessions.delete(sessionId)
+        sendSessionStatus(webContents, sessionId, false)
+      })
+
+      if (startupCommand?.trim()) {
+        ptyProcess.write(startupCommand.trim() + '\r')
+      }
+
+      return workdir
     }
+  )
 
-    const webContents = event.sender
-
-    ptyProcess.onData((data) => {
-      if (!webContents.isDestroyed()) {
-        webContents.send('terminal:data', data)
-      }
-    })
-
-    ptyProcess.onExit(({ exitCode }) => {
-      if (!webContents.isDestroyed()) {
-        webContents.send('terminal:exit', exitCode)
-      }
-      ptyProcess = null
-    })
-
-    return workdir
+  ipcMain.handle('terminal:get-status', (_event, sessionId: string) => {
+    return terminalSessions.has(sessionId)
   })
 
-  ipcMain.on('terminal:input', (_event, data: string) => {
-    ptyProcess?.write(data)
+  ipcMain.on('terminal:input', (_event, sessionId: string, data: string) => {
+    terminalSessions.get(sessionId)?.process.write(data)
   })
 
-  ipcMain.on('terminal:resize', (_event, cols: number, rows: number) => {
+  ipcMain.on('terminal:resize', (_event, sessionId: string, cols: number, rows: number) => {
     try {
-      ptyProcess?.resize(cols, rows)
+      terminalSessions.get(sessionId)?.process.resize(cols, rows)
     } catch {
       /* ignore resize errors */
     }
+  })
+
+  ipcMain.handle('terminal:destroy', (_event, sessionId: string) => {
+    const session = terminalSessions.get(sessionId)
+    if (!session) return false
+    try {
+      session.process.kill()
+    } catch {
+      /* ignore */
+    }
+    terminalSessions.delete(sessionId)
+    const target = BrowserWindow.getAllWindows().find((w) => w.webContents.id === session.senderId)
+    if (target && !target.webContents.isDestroyed()) {
+      sendSessionStatus(target.webContents, sessionId, false)
+    }
+    return true
   })
 }
 
@@ -219,13 +287,13 @@ app.whenReady().then(() => {
 })
 
 app.on('window-all-closed', () => {
-  if (ptyProcess) {
+  for (const [sessionId, session] of terminalSessions.entries()) {
     try {
-      ptyProcess.kill()
+      session.process.kill()
     } catch {
       /* ignore */
     }
-    ptyProcess = null
+    terminalSessions.delete(sessionId)
   }
   if (process.platform !== 'darwin') {
     app.quit()

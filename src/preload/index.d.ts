@@ -1,7 +1,8 @@
 import { ElectronAPI } from '@electron-toolkit/preload'
 
 interface TerminalApi {
-  create: (cols: number, rows: number) => Promise<void>
+  create: (cols: number, rows: number, cwd?: string) => Promise<void>
+  selectFolder: () => Promise<string>
   onData: (callback: (data: string) => void) => () => void
   onExit: (callback: (exitCode: number) => void) => () => void
   sendInput: (data: string) => void

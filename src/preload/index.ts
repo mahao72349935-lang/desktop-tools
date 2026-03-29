@@ -2,8 +2,10 @@ import { contextBridge, ipcRenderer } from 'electron'
 import { electronAPI } from '@electron-toolkit/preload'
 
 const terminalApi = {
-  create: (cols: number, rows: number): Promise<void> =>
-    ipcRenderer.invoke('terminal:create', cols, rows),
+  create: (cols: number, rows: number, cwd?: string): Promise<void> =>
+    ipcRenderer.invoke('terminal:create', cols, rows, cwd),
+
+  selectFolder: (): Promise<string> => ipcRenderer.invoke('dialog:selectFolder'),
 
   onData: (callback: (data: string) => void): (() => void) => {
     const handler = (_event: Electron.IpcRendererEvent, data: string): void => callback(data)

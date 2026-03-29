@@ -4,6 +4,11 @@ import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import '@xterm/xterm/css/xterm.css'
 
+const props = defineProps<{
+  cwd: string
+  title: string
+}>()
+
 /** VS Code 默认 Dark 主题终端色（见 vscode terminalColorRegistry ansiColorMap） */
 const vscodeDarkTerminalTheme = {
   background: '#1e1e1e',
@@ -70,10 +75,9 @@ onMounted(async () => {
   })
   resizeObserver.observe(terminalRef.value)
 
-  // 等待布局完成后再 fit 并创建 PTY，确保获取到正确的列数/行数
   await new Promise((r) => setTimeout(r, 50))
   fitAddon.fit()
-  await window.api.create(terminal.cols, terminal.rows)
+  await window.api.create(terminal.cols, terminal.rows, props.cwd)
 })
 
 onUnmounted(() => {
@@ -89,9 +93,13 @@ onUnmounted(() => {
     <div class="terminal-header">
       <div class="terminal-tab">
         <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
-          <path d="M6 9l3-3-3-3-.7.7L7.6 6 5.3 8.3zm4 .5H7v1h3z" transform="translate(0, 1.5) scale(1.2)" />
+          <path
+            d="M6 9l3-3-3-3-.7.7L7.6 6 5.3 8.3zm4 .5H7v1h3z"
+            transform="translate(0, 1.5) scale(1.2)"
+          />
         </svg>
-        <span>终端</span>
+        <span class="tab-title">{{ title }}</span>
+        <span class="tab-cwd" :title="cwd">{{ cwd }}</span>
       </div>
     </div>
     <div ref="terminalRef" class="terminal-body"></div>
@@ -125,7 +133,7 @@ onUnmounted(() => {
 .terminal-tab {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
   font-size: 12px;
   color: #cccccc;
   font-family:
@@ -135,6 +143,22 @@ onUnmounted(() => {
   padding: 4px 8px;
   border-radius: 4px;
   background: #1e1e1e;
+  min-width: 0;
+  flex: 1;
+}
+
+.tab-title {
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
+.tab-cwd {
+  font-size: 11px;
+  color: #8a8a8a;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
 }
 
 .terminal-body {

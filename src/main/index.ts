@@ -1,13 +1,20 @@
 import { app, shell, BrowserWindow, ipcMain } from 'electron'
 import { join } from 'path'
+import os from 'os'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import icon from '../../resources/icon.png?asset'
+import * as pty from 'node-pty'
+
+process.on('uncaughtException', (err) => {
+  console.error('[uncaughtException]', err.message)
+})
+
+let ptyProcess: pty.IPty | null = null
 
 function createWindow(): void {
-  // Create the browser window.
   const mainWindow = new BrowserWindow({
-    width: 900,
-    height: 670,
+    width: 1100,
+    height: 700,
     show: false,
     autoHideMenuBar: true,
     ...(process.platform === 'linux' ? { icon } : {}),
@@ -26,49 +33,114 @@ function createWindow(): void {
     return { action: 'deny' }
   })
 
-  // HMR for renderer base on electron-vite cli.
-  // Load the remote URL for development or the local html file for production.
   if (is.dev && process.env['ELECTRON_RENDERER_URL']) {
     mainWindow.loadURL(process.env['ELECTRON_RENDERER_URL'])
   } else {
     mainWindow.loadFile(join(__dirname, '../renderer/index.html'))
   }
+
+  mainWindow.on('closed', () => {
+    if (ptyProcess) {
+      ptyProcess.kill()
+      ptyProcess = null
+    }
+  })
 }
 
-// This method will be called when Electron has finished
-// initialization and is ready to create browser windows.
-// Some APIs can only be used after this event occurs.
+function setupTerminalIpc(): void {
+  ipcMain.handle('terminal:create', (event, cols: number, rows: number) => {
+    if (ptyProcess) {
+      try {
+        ptyProcess.kill()
+      } catch {
+        /* ignore */
+      }
+      ptyProcess = null
+    }
+
+    const shellPath = process.platform === 'win32' ? 'powershell.exe' : process.env.SHELL || 'bash'
+    const shellArgs =
+      process.platform === 'win32' ? ['-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass'] : []
+
+    const termEnv: Record<string, string> = {
+      ...(process.env as Record<string, string>),
+      TERM: 'xterm-256color',
+      COLORTERM: 'truecolor',
+      ...(process.platform === 'win32'
+        ? {
+            POWERSHELL_UPDATECHECK: 'Off',
+            POWERSHELL_TELEMETRY_OPTOUT: '1'
+          }
+        : {})
+    }
+
+    try {
+      ptyProcess = pty.spawn(shellPath, shellArgs, {
+        name: 'xterm-256color',
+        cols: cols || 80,
+        rows: rows || 24,
+        cwd: os.homedir(),
+        env: termEnv
+      })
+    } catch (err) {
+      console.error('Failed to spawn pty:', err)
+      return
+    }
+
+    const webContents = event.sender
+
+    ptyProcess.onData((data) => {
+      if (!webContents.isDestroyed()) {
+        webContents.send('terminal:data', data)
+      }
+    })
+
+    ptyProcess.onExit(({ exitCode }) => {
+      if (!webContents.isDestroyed()) {
+        webContents.send('terminal:exit', exitCode)
+      }
+      ptyProcess = null
+    })
+  })
+
+  ipcMain.on('terminal:input', (_event, data: string) => {
+    ptyProcess?.write(data)
+  })
+
+  ipcMain.on('terminal:resize', (_event, cols: number, rows: number) => {
+    try {
+      ptyProcess?.resize(cols, rows)
+    } catch {
+      /* ignore resize errors */
+    }
+  })
+}
+
 app.whenReady().then(() => {
-  // Set app user model id for windows
   electronApp.setAppUserModelId('com.electron')
 
-  // Default open or close DevTools by F12 in development
-  // and ignore CommandOrControl + R in production.
-  // see https://github.com/alex8088/electron-toolkit/tree/master/packages/utils
   app.on('browser-window-created', (_, window) => {
     optimizer.watchWindowShortcuts(window)
   })
 
-  // IPC test
-  ipcMain.on('ping', () => console.log('pong'))
-
+  setupTerminalIpc()
   createWindow()
 
   app.on('activate', function () {
-    // On macOS it's common to re-create a window in the app when the
-    // dock icon is clicked and there are no other windows open.
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
   })
 })
 
-// Quit when all windows are closed, except on macOS. There, it's common
-// for applications and their menu bar to stay active until the user quits
-// explicitly with Cmd + Q.
 app.on('window-all-closed', () => {
+  if (ptyProcess) {
+    try {
+      ptyProcess.kill()
+    } catch {
+      /* ignore */
+    }
+    ptyProcess = null
+  }
   if (process.platform !== 'darwin') {
     app.quit()
   }
 })
-
-// In this file you can include the rest of your app's specific main process
-// code. You can also put them in separate files and require them here.
